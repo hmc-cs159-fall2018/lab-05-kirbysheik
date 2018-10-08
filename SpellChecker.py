@@ -93,7 +93,7 @@ class SpellChecker():
                 if candidates == [] and fallback:
                     returnList.append([word])
                 else:
-                    candidates.sort(key = cmscore(,word), reverse=True)
+                    candidates.sort(key = lambda x: .5*(cmscore(x,word)+unigram_score(word)), reverse=True)
                     returnList.append(candidates)
         return returnList
 
@@ -113,7 +113,41 @@ class SpellChecker():
             tokens.append(candidates[0])
 
         return tokens
-        
 
+    def autocorrect_line(self, line):
+        tokens = nlp(line)
+        sentence_list = []
+        for sentence in tokens:
+            sentence_tokens = self.autocorrect_sentence(sentence)
+            sentence_list += " ".join(sentence_tokens)
+        new_line = " ".join(sentence_list)
+        return new_line
 
+    def suggest_sentence(self, sentence, max_suggestions):
+        checks = self.check_sentence(sentence)
+        returnList = []
+        for candidates in checks:
+            if len(candidates)==1:
+                returnList += candidates[0]
+            else:
+                best = candidates[0]
+                best_score = .5*(unigram_score(best) + bigram_score('</s>',best, candidates[1]))
+                for i in range(len(1,candidates):
+                    prev_word = candidates[i-1]
+                    focus_word = candidates[i]
+                    next_word = candidates[i+1]
+                    new_score = .5*(unigram_score(focus_word) +
+                                    bigram_score(prev_word, focus_word, next_word))
+                    if new_score > best_score:
+                        best = new_word
+                        best_score = new_score
+                    returnList += best
+        return returnList
+
+    def suggest_text(self, text, max_suggestions):
+        tokens = nlp(text)
+        returnList = []
+        for sentence in tokens:
+            returnList += suggest_sentence(sentence, max_suggestions)
+	return returnList
 
