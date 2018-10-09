@@ -1,28 +1,28 @@
 import spacy
 import argparse
 import string
-import EditDistanceFinder
+import EditDistance
 import LanguageModel
 
 class SpellChecker():
 
     nlp = spacy.load("en", pipeline=["tagger", "parser"])
-    alphabet = [string.ascii_lower] + ["%"]
     BLANK = '%'
+    ALPHA = string.ascii_lowercase + BLANK
 
-    def __init__(self, channel_model = None, 
-            language_model = None, max_distance)):
+    def __init__(self, max_distance, channel_model = None, 
+            language_model = None):
 
         self.channel_model = channel_model
         self.language_model = language_model
         self.max_distance = max_distance
 
     def load_channel_model(self, fp):
-        self.channel_model = EditDistanceFinder()
+        self.channel_model = EditDistance.EditDistanceFinder()
         self.channel_model.load(fp)
 
     def load_language_model(self, fp):
-        self.language_model = LanguageModel()
+        self.language_model = LanguageModel.LanguageModel()
         self.language_model.load(fp)
 
     def bigram_score(self, prev_word, focus_word, next_word):
@@ -33,13 +33,13 @@ class SpellChecker():
     def unigram_score(self, word):
         return self.language_model.unigram_prob(word)
 
-    def cm_socre(self, error_word, corrected_word):
+    def cm_score(self, error_word, corrected_word):
         return self.channel_model.prob(error_word, corrected_word)
 
     def inserts(self, word):
         returnList = []
         for i in range(len(word) + 1):
-            for letter in alphabet:
+            for letter in self.ALPHA:
                 testIns = word[:i] + letter + word[i:]
                 if testIns in self.language_model:
                     returnList.append(testIns)
@@ -58,25 +58,39 @@ class SpellChecker():
     def substitutions(self, word):
         returnList = []
         for i in range(len(word)):
-            for letter in alphabet:
+            for letter in self.ALPHA:
                 testSub = word[:i] + letter + word[i+1:]
                 if testSub in self.language_model:
                     returnList.append(testSub)
 
         return returnList
 
+    def transpositions(self, word):
+        returnList = []
+        for i in range(len(word) - 1):
+            testSwap = word[:i] + word[i + 1] + word[i] + word[i+2:]
+            if testSwap in self.language_model:
+                returnList.append(testSwap)
+
+        return returnList
+
     def generate_candidates(self, word):
-        return list(self.generate_candidates_helper(word, self.max_distance))
+        if word in string.punctuation:
+            return [word]
+        elif word == '\n':
+            return [word]
+        return list(self.generate_candidates_helper(word, self.max_distance))[1:]
 
     def generate_candidates_helper(self, word, current_dist):
         insList = self.inserts(word)
         delList = self.deletes(word)
         subList = self.substitutions(word)
-        candidates = set(insList + delList + subList)
+        swapList = self.transpositions(word)
+        candidates = set(insList + delList + subList + swapList)
         if current_dist == 1:
             return candidates
         else:
-            total_candidates = candidates
+            total_candidates = set(candidates)
             new_dist = current_dist - 1
             for w in candidates:
                 new_candidates = self.generate_candidates_helper(w, new_dist) 
@@ -85,7 +99,17 @@ class SpellChecker():
     
     def check_sentence(self, sentence, fallback=False):
         returnList = []
-        for word in sentence:
+        for i in range(len(sentence)):
+            if i != 0:
+                prev = sentence[i-1]
+            else:
+                prev = '<s>'
+            word = sentence[i]
+            if i + 1 < len(sentence):
+                next = sentence[i + 1]
+            else:
+                next = '</s>'
+
             if word in self.language_model:
                 returnList.append([word])
             else:
@@ -93,16 +117,26 @@ class SpellChecker():
                 if candidates == [] and fallback:
                     returnList.append([word])
                 else:
-                    candidates.sort(key = lambda x: .5*(cmscore(x,word)+unigram_score(word)), reverse=True)
+                    score_fn = lambda c: self.suggestion_score(prev, word, c, next)
+                    candidates.sort(key = score_fn, reverse=True)
                     returnList.append(candidates)
         return returnList
 
+    def suggestion_score(self, prev_word, obs_word, focus_word, next_word):
+        unigram_prob = self.unigram_score(focus_word)
+        bigram_prob = self.bigram_score(prev_word, focus_word, next_word)
+        lm_score = 0.5 * (unigram_prob + bigram_prob)
+        cmscore = self.cm_score(obs_word, focus_word)
+        return lm_score + cmscore
+
     def check_text(self, text, fallback=False):
-        doc = nlp(text)
+        doc = self.nlp(text)
+        sentences = list(doc.sents)
 
         all_sentences = []
-        for sentence in doc:
-            all_sentences += self.check_sentence(sentence, fallback) 
+        for sent in sentences:
+            sent_list = [ str(t).lower() for t in sent]
+            all_sentences += self.check_sentence(sent_list, fallback) 
         return all_sentences
 
     def autocorrect_sentence(self, sentence):
@@ -115,39 +149,35 @@ class SpellChecker():
         return tokens
 
     def autocorrect_line(self, line):
-        tokens = nlp(line)
+        doc = self.nlp(line)
+        sentences = list(doc.sents) 
+
         sentence_list = []
-        for sentence in tokens:
-            sentence_tokens = self.autocorrect_sentence(sentence)
-            sentence_list += " ".join(sentence_tokens)
-        new_line = " ".join(sentence_list)
-        return new_line
+        for sent in sentences:
+            sent_list = [str(t).lower() for t in sent]
+            sentence_tokens = self.autocorrect_sentence(sent_list)
+            sentence_list += sentence_tokens
+        
+        return sentence_list
 
     def suggest_sentence(self, sentence, max_suggestions):
         checks = self.check_sentence(sentence)
         returnList = []
+
         for candidates in checks:
-            if len(candidates)==1:
-                returnList += candidates[0]
+            if len(candidates) == 1:
+                returnList.append(candidates[0])
             else:
-                best = candidates[0]
-                best_score = .5*(unigram_score(best) + bigram_score('</s>',best, candidates[1]))
-                for i in range(len(1,candidates):
-                    prev_word = candidates[i-1]
-                    focus_word = candidates[i]
-                    next_word = candidates[i+1]
-                    new_score = .5*(unigram_score(focus_word) +
-                                    bigram_score(prev_word, focus_word, next_word))
-                    if new_score > best_score:
-                        best = new_word
-                        best_score = new_score
-                    returnList += best
+                returnList.append(candidates[0:max_suggestions])
+                
         return returnList
 
     def suggest_text(self, text, max_suggestions):
-        tokens = nlp(text)
+        doc = self.nlp(text)
+        sentences = doc.sents
         returnList = []
-        for sentence in tokens:
-            returnList += suggest_sentence(sentence, max_suggestions)
-	return returnList
+        for sent in sentences:
+            sent_list = [str(t) for t in sent]
+            returnList += self.suggest_sentence(sent_list, max_suggestions)
+        return returnList
 
